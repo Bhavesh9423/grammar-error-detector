@@ -45,6 +45,24 @@ app = Flask(
     static_url_path='/static'
 )
 
+class VercelPrefixMiddleware:
+    """Normalizes PATH_INFO when invoked through Vercel serverless rewrites."""
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        path = environ.get('PATH_INFO', '')
+        for prefix in ('/api/index.py', '/api/index'):
+            if path == prefix:
+                environ['PATH_INFO'] = '/'
+                break
+            elif path.startswith(prefix + '/'):
+                environ['PATH_INFO'] = path[len(prefix):] or '/'
+                break
+        return self.wsgi_app(environ, start_response)
+
+app.wsgi_app = VercelPrefixMiddleware(app.wsgi_app)
+
 if has_cors:
     CORS(app)
 
