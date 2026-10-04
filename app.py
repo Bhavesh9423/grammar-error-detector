@@ -9,7 +9,12 @@ import os
 import sys
 import logging
 from flask import Flask, render_template, request, jsonify
-from flask_cors import CORS
+
+try:
+    from flask_cors import CORS
+    has_cors = True
+except ImportError:
+    has_cors = False
 
 from database.db import (
     init_db,
@@ -30,15 +35,26 @@ logging.basicConfig(
     format='[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
 )
 logger = logging.getLogger(__name__)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app)
+# Initialize Flask app with explicit template and static directories
+app = Flask(
+    __name__,
+    template_folder=os.path.join(BASE_DIR, 'templates'),
+    static_folder=os.path.join(BASE_DIR, 'static'),
+    static_url_path='/static'
+)
 
-# Ensure database is initialized on startup
+if has_cors:
+    CORS(app)
+
+# Ensure database is initialized safely on startup
 with app.app_context():
-    init_db()
-    logger.info("SQLite database initialized successfully.")
+    try:
+        init_db()
+        logger.info("SQLite database initialized successfully.")
+    except Exception as e:
+        logger.warning(f"Database startup warning: {e}")
 
 
 # -------------------------------------------------------------

@@ -7,17 +7,53 @@ Implements core NLP tasks:
 3. Part-of-Speech (POS) Tagging (Penn Treebank tagset)
 4. Lemmatization using WordNet
 5. Lexical Diversity & Syntactic Metrics
+Supports serverless deployment environments (e.g. Vercel / AWS Lambda).
 """
 
+import os
+import re
 import string
+import tempfile
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.tag import pos_tag
 from nltk.stem import WordNetLemmatizer
-from nltk.corpus import wordnet
 
-# Initialize lemmatizer singleton
-lemmatizer = WordNetLemmatizer()
+# Configure serverless-safe NLTK data directory
+NLTK_DATA_DIR = os.path.join(tempfile.gettempdir(), 'nltk_data')
+try:
+    os.makedirs(NLTK_DATA_DIR, exist_ok=True)
+    if NLTK_DATA_DIR not in nltk.data.path:
+        nltk.data.path.insert(0, NLTK_DATA_DIR)
+except Exception:
+    pass
+
+_NLTK_DOWNLOADED = False
+
+def ensure_nltk_corpora():
+    """Silently ensures essential NLTK data is available in the writable temp directory."""
+    global _NLTK_DOWNLOADED
+    if _NLTK_DOWNLOADED:
+        return
+    packages = ['punkt', 'punkt_tab', 'averaged_perceptron_tagger', 'averaged_perceptron_tagger_eng', 'wordnet', 'omw-1.4']
+    for pkg in packages:
+        try:
+            nltk.download(pkg, download_dir=NLTK_DATA_DIR, quiet=True)
+        except Exception:
+            pass
+    _NLTK_DOWNLOADED = True
+
+# Try initializing corpora on import
+try:
+    ensure_nltk_corpora()
+except Exception:
+    pass
+
+# Initialize lemmatizer singleton safely
+try:
+    lemmatizer = WordNetLemmatizer()
+except Exception:
+    lemmatizer = None
 
 # Penn Treebank POS tag descriptions and category groupings
 POS_TAG_MAP = {
@@ -80,28 +116,65 @@ def get_pos_explanation(tag: str) -> dict:
 
 def penn_to_wordnet_pos(penn_tag: str):
     """Maps Penn Treebank POS tag to WordNet POS tag for lemmatization."""
-    if penn_tag.startswith('J'):
-        return wordnet.ADJ
-    elif penn_tag.startswith('V'):
-        return wordnet.VERB
-    elif penn_tag.startswith('N'):
+    try:
+        from nltk.corpus import wordnet
+        if penn_tag.startswith('J'):
+            return wordnet.ADJ
+        elif penn_tag.startswith('V'):
+            return wordnet.VERB
+        elif penn_tag.startswith('N'):
+            return wordnet.NOUN
+        elif penn_tag.startswith('R'):
+            return wordnet.ADV
         return wordnet.NOUN
-    elif penn_tag.startswith('R'):
-        return wordnet.ADV
-    return wordnet.NOUN
+    except Exception:
+        return 'n'
 
 
 def lemmatize_word(word: str, penn_tag: str) -> str:
     """Lemmatizes a single word using WordNet based on its POS tag."""
+    if not lemmatizer:
+        return word.lower()
     wn_tag = penn_to_wordnet_pos(penn_tag)
     try:
         lemma = lemmatizer.lemmatize(word.lower(), pos=wn_tag)
-        # Restore case if original was capitalized
         if word.istitle():
             return lemma.capitalize()
         return lemma
     except Exception:
         return word.lower()
+
+
+def _fallback_pos_tag(tokens: list) -> list:
+    """Lightweight rule-based POS tagger used if NLTK models are missing in cloud sandbox."""
+    tags = []
+    pronouns = {'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'this', 'that'}
+    verbs = {'is', 'are', 'was', 'were', 'am', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'go', 'goes', 'went', 'like', 'likes', 'play', 'plays', 'playing'}
+    determiners = {'a', 'an', 'the', 'some', 'any', 'every', 'each'}
+    prepositions = {'in', 'on', 'at', 'to', 'for', 'with', 'from', 'by', 'about', 'over'}
+    wh_words = {'what', 'when', 'where', 'which', 'who', 'whom', 'whose', 'why', 'how'}
+
+    for t in tokens:
+        tl = t.lower()
+        if t in string.punctuation:
+            tags.append((t, '.' if t in '.!?' else ',' if t == ',' else ':'))
+        elif tl in wh_words:
+            tags.append((t, 'WRB' if tl in {'where', 'when', 'why', 'how'} else 'WP'))
+        elif tl in pronouns:
+            tags.append((t, 'PRP'))
+        elif tl in determiners:
+            tags.append((t, 'DT'))
+        elif tl in verbs:
+            tags.append((t, 'VBZ' if tl.endswith('s') else 'VBD' if tl in {'was', 'were', 'had', 'did', 'went'} else 'VBP'))
+        elif tl in prepositions:
+            tags.append((t, 'IN'))
+        elif t.isdigit():
+            tags.append((t, 'CD'))
+        elif t[0].isupper() and len(tags) > 0 and tags[-1][1] != '.':
+            tags.append((t, 'NNP'))
+        else:
+            tags.append((t, 'NN'))
+    return tags
 
 
 def analyze_text(text: str) -> dict:
@@ -136,19 +209,20 @@ def analyze_text(text: str) -> dict:
     try:
         sentences = sent_tokenize(raw_text)
     except Exception:
-        # Fallback regex segmentation
-        sentences = [s.strip() for s in text.replace('!', '.').replace('?', '.').split('.') if s.strip()]
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', raw_text) if s.strip()]
+        if not sentences:
+            sentences = [raw_text]
 
     # Step 2 & 3: Word Tokenization and POS Tagging
     try:
         tokens_raw = word_tokenize(raw_text)
     except Exception:
-        tokens_raw = raw_text.split()
+        tokens_raw = re.findall(r"\w+(?:'\w+)?|[^\w\s]", raw_text)
 
     try:
         pos_tags = pos_tag(tokens_raw)
     except Exception:
-        pos_tags = [(t, 'NN') for t in tokens_raw]
+        pos_tags = _fallback_pos_tag(tokens_raw)
 
     # Step 4: Token Detail Construction & Lemmatization
     analyzed_tokens = []
