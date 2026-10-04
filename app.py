@@ -51,14 +51,26 @@ class VercelPrefixMiddleware:
         self.wsgi_app = wsgi_app
 
     def __call__(self, environ, start_response):
-        path = environ.get('PATH_INFO', '')
-        for prefix in ('/api/index.py', '/api/index'):
-            if path == prefix:
-                environ['PATH_INFO'] = '/'
-                break
-            elif path.startswith(prefix + '/'):
-                environ['PATH_INFO'] = path[len(prefix):] or '/'
-                break
+        import urllib.parse
+        qs = urllib.parse.parse_qs(environ.get('QUERY_STRING', ''))
+        
+        if '__orig_path' in qs:
+            target = qs['__orig_path'][0]
+            new_qs_dict = {k: v for k, v in qs.items() if k != '__orig_path'}
+            environ['QUERY_STRING'] = urllib.parse.urlencode(new_qs_dict, doseq=True)
+            while '//' in target:
+                target = target.replace('//', '/')
+            environ['PATH_INFO'] = target if target.startswith('/') else '/' + target
+        else:
+            path = environ.get('PATH_INFO', '')
+            for prefix in ('/api/index.py', '/api/index'):
+                if path == prefix:
+                    environ['PATH_INFO'] = '/'
+                    break
+                elif path.startswith(prefix + '/'):
+                    environ['PATH_INFO'] = path[len(prefix):] or '/'
+                    break
+
         return self.wsgi_app(environ, start_response)
 
 app.wsgi_app = VercelPrefixMiddleware(app.wsgi_app)
